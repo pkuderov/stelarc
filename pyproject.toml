@@ -10,18 +10,25 @@ license = { file = "LICENSE" }
 requires-python = ">=3.9"
 
 dependencies = [
-    "numpy >=1.23, <2.0",
+    "numpy >=1.23",
     "numba >=0.57",
     "torch >=2.0",
-    "gymnasium >=1.1",
+    "gymnasium[box2d,array-api] >=1.1",
     "matplotlib",
-    "wandb"
+    "wandb",
+
 ]
 
 [project.optional-dependencies]
 dev = [
     "jupyterlab"
 ]
+
+[tool.uv]
+# swig is required for gymnasium[box2d]
+# you can install swig manually before main installation:
+#   uv tool install swig
+dev-dependencies = ["swig"]
 
 [build-system]
 requires = ["setuptools>=61"]
