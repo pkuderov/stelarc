@@ -39,6 +39,7 @@ def run_epoch(
         acc += info['n_correct']
         n_eps += info['n_done']
         if is_train:
+            # noinspection PyUnboundLocalVariable
             pi_loss += loss[0]
             v_loss += loss[1]
 
@@ -58,7 +59,9 @@ def run_epoch(
 
         tot, sfx = _to_readable_num(total_steps * env.num_envs)
         print(
-            f'{epoch} [{tot:.0f}{sfx}]: {acc:.2f} {ret:.3f}  |  {ep_len_sum:.1f}  {n_eps}  |  {pi_loss:.4f}   {v_loss:.4f}'
+            f'{epoch} [{tot:.0f}{sfx}]: {acc:.2f} {ret:.3f}  '
+            f'|  {ep_len_sum:.1f}  {n_eps}  '
+            f'|  {pi_loss:.4f}   {v_loss:.4f}'
         )
         return (
             total_steps, (o, state),
@@ -69,7 +72,9 @@ def run_epoch(
     return (o, state), dict(acc=acc, ret=ret, ep_len=ep_len_sum)
 
 
-def run_experiment(env, test_env, agent, n_epochs, n_steps, eval_configs):
+def run_experiment(
+        env, test_env, agent, n_epochs, n_steps, eval_configs,
+):
     train_results = defaultdict(list)
     test_results = defaultdict(list)
 

@@ -329,7 +329,7 @@ def test_ac_compilation():
         from oculr.image.buffer import PrefetchedImageBuffer
 
         seed = 8041990
-        ds = Dataset(seed, 'mnist', grayscale=True, lp_norm=None)
+        ds = Dataset( 'mnist', grayscale=True, lp_norm=None, seed=seed)
         env = ImageEnvironment(
             ds, num_envs=2, obs_hw_shape=7, max_time_steps=20, seed=42,
             answer_reward=(1.0, -0.3), step_reward=-0.01,
