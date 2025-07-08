@@ -3,7 +3,7 @@
 > *Spatio-TEmporal Learning And Recursive Computing*  
 > *(Named in homage to the performance artist Stelarc)*
 
-`Stelarc` is a biologically inspired, memory-driven vision agent for the `oculr` environment.  
+`Stelarc` is a biologically inspired, memory-driven vision agent.  
 It actively explores visual scenes by moving its gaze, remembering what it saw, and learning to perceive over time.
 
 Key ideas:
