@@ -1,15 +1,7 @@
-from enum import Enum, auto
-
 import numpy as np
 import torch
 from torch import nn, optim
 from torch.distributions import Categorical
-
-
-class RlProcessingType(Enum):
-    LSTM = 1
-    SUM_ATTENTION = auto()
-    SE = auto()
 
 
 class RlClassifier(nn.Module):
@@ -33,9 +25,7 @@ class RlClassifier(nn.Module):
             ent_scales: tuple[float] = (1.0, 1.0, 1.0, 1.0),
             ent_loss_scale: float = 0.001,
             seed: int = None,
-            min_lr_scale: float = 20.0,
-            processing_type: RlProcessingType = RlProcessingType.LSTM,
-            se_config: dict = None, se_pooling: int = 1
+            min_lr_scale: float = 20.0
     ):
         super().__init__()
         self.rng = np.random.default_rng(seed)
@@ -320,41 +310,40 @@ def _get_entropy(p, dim=-1, keepdim=False, normalize=False):
 
 
 def test_ac_compilation():
-    def main():
-        from functools import partial
-        import numpy as np
+    from functools import partial
+    import numpy as np
 
-        from oculr.dataset import Dataset
-        from oculr.env import ImageEnvironment
-        from oculr.image.buffer import PrefetchedImageBuffer
+    from oculr.dataset import Dataset
+    from oculr.env import ImageEnvironment
+    from oculr.image.buffer import PrefetchedImageBuffer
 
-        seed = 8041990
-        ds = Dataset( 'mnist', grayscale=True, lp_norm=None, seed=seed)
-        env = ImageEnvironment(
-            ds, num_envs=2, obs_hw_shape=7, max_time_steps=20, seed=42,
-            answer_reward=(1.0, -0.3), step_reward=-0.01,
-            img_buffer_fn=partial(PrefetchedImageBuffer, prefetch_size=256),
-        )
-        o, info = env.reset()
-        o, r, terminated, truncated, info = env.step(
-            np.array([
-                [1, 0, 5, 10],
-                [0, 10, 4, 6],
-            ])
-        )
+    seed = 8041990
+    ds = Dataset( 'mnist', grayscale=True, lp_norm=None, seed=seed)
+    env = ImageEnvironment(
+        ds, num_envs=2, obs_hw_shape=7, max_time_steps=20, seed=42,
+        answer_reward=(1.0, -0.3), step_reward=-0.01,
+        img_buffer_fn=partial(PrefetchedImageBuffer, prefetch_size=256),
+    )
+    o, info = env.reset()
+    o, r, terminated, truncated, info = env.step(
+        np.array([
+            [1, 0, 5, 10],
+            [0, 10, 4, 6],
+        ])
+    )
 
-        agent = RlClassifier(
-            obs_size=env.total_obs_size,
-            encoder=[32], hid_size=64, skip_connection=True, body=[32],
-            pi_heads=(
-                3, env.n_classes, *env.pos_range[1]
-            ),
-            learning_rate=0.05,
-            gamma=0.95,
-            batch_size=64,
-            seed=seed,
-        )
-        _ = agent.predict(o)
+    agent = RlClassifier(
+        obs_size=env.total_obs_size,
+        encoder=[32], hid_size=64, skip_connection=True, body=[32],
+        pi_heads=(
+            3, env.n_classes, *env.pos_range[1]
+        ),
+        learning_rate=0.05,
+        gamma=0.95,
+        batch_size=64,
+        seed=seed,
+    )
+    _ = agent.predict(o)
 
 
 if __name__ == '__main__':

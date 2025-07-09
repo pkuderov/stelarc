@@ -84,7 +84,7 @@ class SharedActorCritic(nn.Module):
         return pi, v.squeeze(-1)
 
 
-class Ppo:
+class PpoClassic:
     def __init__(
             self, ac_type, obs_size, hidden_size, n_actions,
             *, lr, betas,
