@@ -1,12 +1,145 @@
+from collections import defaultdict
+
 import numpy as np
 import torch
-from torch import nn, optim
+from torch import nn
 from torch.distributions import Categorical
+from torch.optim.swa_utils import AveragedModel
 
+from stelarc.agents.utils.gae import GAE
+from stelarc.agents.utils.soft_clip import SoftClip
 from stelarc.agents.utils.torch import make_layers, concat_obs_parts
 
 
-class RlClassifier(nn.Module):
+class Agent:
+    def __init__(
+            self,
+            ac_type, obs_size, hidden_size, n_actions,
+            *,
+            lr, betas,
+            gamma, gae_lambda,
+            K_epochs, mini_batch_size,
+            eps_clip, v_clip=False,
+            v_loss_alpha=None, ent_loss_alpha=0.1, ent_loss_alpha_decay=0.997,
+            min_ent_loss_ratio=1 / 50.0,
+            ema_lr=0.,
+            device=None
+    ):
+        self.lr = lr
+        self.betas = betas
+        self.gamma = gamma
+        self.gae = GAE(gamma, gae_lambda)
+        self.eps_clip = eps_clip
+        self.v_clip_enabled = v_clip
+        self.v_clip = SoftClip(eps=self.eps_clip, start_from=0.75)
+        self.K_epochs = K_epochs
+        self.mini_batch_size = mini_batch_size
+        self.v_loss_alpha = v_loss_alpha if v_loss_alpha is not None else 1.0
+        self.ent_loss_alpha_init = self.ent_loss_alpha = ent_loss_alpha
+        self.ent_loss_alpha_decay = ent_loss_alpha_decay
+        self.min_ent_loss_ratio = min_ent_loss_ratio
+
+        self.policy = ac_type(obs_size, hidden_size, n_actions).to(device)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.lr, betas=betas)
+
+        self.ema_lr = ema_lr
+        self.ema_policy_enabled = 0.0 < ema_lr < 1.0
+        if self.ema_policy_enabled:
+            ema_step_fn = lambda avg_model_parameter, model_parameter, _: (
+                    (1.0 - ema_lr) * avg_model_parameter + ema_lr * model_parameter
+            )
+            self.target_policy = AveragedModel(self.policy, avg_fn=ema_step_fn)
+        else:
+            # in case it's turned off, expose the same policy
+            self.target_policy = self.policy
+
+    def update(self, batch: Batch):
+        # NB: data in batch is already no-grad
+        if self.ema_policy_enabled:
+            with torch.no_grad():
+                # replace target policy distr logprobs with policy logprobs
+                # for the entire batch
+                pi, _ = self.policy(batch.obs[:-1])
+                batch.logprob = pi.log_prob(batch.a)
+
+        fl_batch = batch.flatten()
+        clip = self.eps_clip
+        stats_hist = defaultdict(list)
+
+        for i_epoch in range(1, self.K_epochs + 1):
+            for ixs in batch.split_ixs(self.mini_batch_size):
+                obs, a, orig_logprob = fl_batch.obs[ixs], fl_batch.a[ixs], fl_batch.logprob[ixs]
+                G, trunc = fl_batch.lambda_ret[ixs], fl_batch.trunc[ixs]
+
+                pi, v = self.policy(obs)
+                logprob = pi.log_prob(a)
+                log_ratio = logprob - orig_logprob
+                ratio = torch.exp(log_ratio)
+
+                # term: G=0 -> correct td err —> learn V(s_term) = 0
+                # trunc: zero out td err to turn off learning for this pseudo-step
+                td_err = torch.where(trunc, 0., G - v)
+                A = td_err.detach()
+
+                # find surrogate loss:
+                surr1 = ratio * A
+                surr2 = ratio.clamp(1 - clip, 1 + clip) * A
+
+                pi_loss = -torch.minimum(surr1, surr2).mean()
+
+                # take squared TD (MC) err,..
+                v_lr = self.v_loss_alpha
+                sq_td_err = torch.pow(td_err, 2)
+
+                # .. then soft clip it via log ratios from policy:
+                # such clipping doesn't affect gradient flow, but rescales
+                # learning rate resulting to fast vanishing gradients for "should-be-clipped" (s,a) pairs
+                v_soft_clip_alpha, _ = self.v_clip(log_ratio.detach())
+                if self.v_clip_enabled:
+                    v_lr = v_lr * v_soft_clip_alpha
+                # NB: apply lr before taking mean because learning rate is now sample-based
+                v_loss = torch.mean(v_lr * sq_td_err)
+
+                # calc entropy loss
+                h_lr = self.ent_loss_alpha
+                h_loss = -h_lr * pi.entropy().mean()
+
+                loss = pi_loss + v_loss + h_loss
+
+                self.optimizer.zero_grad()
+                loss.mean().backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+                self.optimizer.step()
+
+                if i_epoch != self.K_epochs:
+                    continue
+                # save stats for logging
+                with torch.no_grad():
+                    abs_td_err = torch.abs(td_err)
+                    clip_ratio = (torch.abs(ratio - 1.0) > clip).float()
+                    kl_div = torch.abs(torch.exp(logprob) * log_ratio)
+
+                    stats_keys = ['pi', '|pi|', 'pi_clip', 'v', 'v_clip', 'h', 'kl', 'A', '|TDErr|']
+                    stats_vals = [
+                        pi_loss, torch.abs(pi_loss), clip_ratio,
+                        v_loss, v_soft_clip_alpha, h_loss, kl_div,
+                        A, torch.abs(td_err),
+                    ]
+                    for k, v in zip(stats_keys, stats_vals):
+                        stats_hist[k].append(torch.mean(v).item())
+
+        self.ent_loss_alpha *= self.ent_loss_alpha_decay
+        self.ent_loss_alpha = max(
+            self.ent_loss_alpha, self.ent_loss_alpha_init * self.min_ent_loss_ratio
+        )
+
+        # apply target policy slow update if enabled
+        if self.ema_policy_enabled:
+            self.target_policy.update_parameters(self.policy)
+        return {k: np.mean(v) for k, v in stats_hist.items()}
+
+
+class PpoModule(nn.Module):
     layer_dims: list[int]
 
     _lr_epoch_step: int
@@ -20,23 +153,12 @@ class RlClassifier(nn.Module):
             mem_skip_connection: bool,
             body: list[int],
             pi_heads: tuple[int],
-            learning_rate: float,
-            gamma: float,
-            batch_size: int = 64,
-            val_loss_scale: float = 0.25,
-            ent_scales: tuple[float] = (1.0, 1.0, 1.0, 1.0),
-            ent_loss_scale: float = 0.001,
+
             seed: int = None,
-            min_lr_scale: float = 20.0
     ):
         super().__init__()
-        self.rng = np.random.default_rng(seed)
-        self.lr = learning_rate
+        # TODO: support seeded initialisation
         self.n_classes = pi_heads[1]
-        self.gamma = gamma
-        self.val_loss_scale = val_loss_scale
-        self.ent_loss_scale = ent_loss_scale
-        self.ent_scales = ent_scales
         self._pi_heads = pi_heads
         self._pi_head_shifts = np.cumsum(pi_heads)
 
@@ -89,23 +211,6 @@ class RlClassifier(nn.Module):
 
         # TODO: check if should be configurable
         self.body_skip = pi_enc_size == val_enc_size == body_input_size and len(body) > 0
-
-        self.optim = optim.AdamW(self.parameters(), lr=self.lr)
-        self.mse = nn.MSELoss()
-
-        self.batch_size = batch_size
-        self._loss = 0.
-        self._last_loss = 0.
-        self._batch_cnt = 0
-
-        self._min_lr = self.lr / min_lr_scale
-        self._lr_epoch = lambda lr: int(7.0 / lr)
-        self._lr_scaler = lambda _: 0.8
-        self.lr_scheduler = optim.lr_scheduler.MultiplicativeLR(
-            self.optim, lr_lambda=self._lr_scaler,
-        )
-        self._lr_epoch_step = 0
-        self._lr_epoch_steps = self._lr_epoch(self.lr)
 
     def _encode(self, x, state):
         x = concat_obs_parts(x)
@@ -275,61 +380,3 @@ class RlClassifier(nn.Module):
                 self.lr_scheduler.step()
 
         return ret_loss
-
-
-def _normalize_entropy(h, size):
-    return h / torch.log(h.new([size]))
-
-
-def _get_entropy(p, dim=-1, keepdim=False, normalize=False):
-    single_val = p.shape[dim] == 1
-    if normalize and not single_val:
-        p = p / (p.sum(-1, keepdim=True) + 1e-6)
-
-    def _entr(p):
-        return -torch.where(p > 0, p * p.log(), p.new([0.0])).sum(dim=dim, keepdim=keepdim)
-
-    H = _entr(p) if not single_val else _entr(p) + _entr(1.0 - p)
-    n = max(2, p.shape[dim])
-    return H / torch.log(H.new([n]))
-
-
-def test_ac_compilation():
-    from functools import partial
-    import numpy as np
-
-    from oculr.dataset import Dataset
-    from oculr.env import ImageEnvironment
-    from oculr.image.buffer import PrefetchedImageBuffer
-
-    seed = 8041990
-    ds = Dataset( 'mnist', grayscale=True, lp_norm=None, seed=seed)
-    env = ImageEnvironment(
-        ds, num_envs=2, obs_hw_shape=7, max_time_steps=20, seed=42,
-        answer_reward=(1.0, -0.3), step_reward=-0.01,
-        img_buffer_fn=partial(PrefetchedImageBuffer, prefetch_size=256),
-    )
-    o, info = env.reset()
-    o, r, terminated, truncated, info = env.step(
-        np.array([
-            [1, 0, 5, 10],
-            [0, 10, 4, 6],
-        ])
-    )
-
-    agent = RlClassifier(
-        obs_size=env.total_obs_size,
-        obs_encoder=[32], mem_hidden_size=64, mem_skip_connection=True, body=[32],
-        pi_heads=(
-            3, env.n_classes, *env.pos_range[1]
-        ),
-        learning_rate=0.05,
-        gamma=0.95,
-        batch_size=64,
-        seed=seed,
-    )
-    _ = agent.predict(o)
-
-
-if __name__ == '__main__':
-    test_ac_compilation()

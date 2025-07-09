@@ -24,7 +24,7 @@ def run_mnist():
 
     agent = RlClassifier(
         obs_size=env.total_obs_size,
-        encoder=[], hid_size=32, skip_connection=True, body=[32],
+        obs_encoder=[], mem_hidden_size=32, mem_skip_connection=True, body=[32],
         pi_heads=(3, env.n_classes, *env.pos_range[1]),
         learning_rate=0.01,
         gamma=0.99,
@@ -76,7 +76,7 @@ def run_cifar_grayscale():
 
     agent = RlClassifier(
         obs_size=env.total_obs_size,
-        encoder=[], hid_size=32, skip_connection=True, body=[32],
+        obs_encoder=[], mem_hidden_size=32, mem_skip_connection=True, body=[32],
         pi_heads=(3, env.n_classes, *env.pos_range[1]),
         learning_rate=0.01,
         gamma=0.99,
@@ -128,7 +128,7 @@ def run_cifar_rgb():
 
     agent = RlClassifier(
         obs_size=env.total_obs_size,
-        encoder=[], hid_size=32, skip_connection=True, body=[32],
+        obs_encoder=[], mem_hidden_size=32, mem_skip_connection=True, body=[32],
         pi_heads=(3, env.n_classes, *env.pos_range[1]),
         learning_rate=0.01,
         gamma=0.99,
