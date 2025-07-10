@@ -1,22 +1,13 @@
 from types import SimpleNamespace
 
-from stelarc.agents.ppo_classic import device, ActorCritic, PpoClassic
+from stelarc.agents.ppo_classic import ActorCritic, PpoClassic
 from stelarc.pipeline_ppo import run_experiment, make_classic_env
 from stelarc.config import get_seed, set_seed
 
 
 def test_ppo(env_name ="CartPole-v1"):
-    config = SimpleNamespace()
-
-    if hasattr(config, 'log'):
-        config.log.wandb = False
-        config.run.steps_range = (10_000, 25_000)
-        env, *_ = make_classic_env(**config.env.__dict__, device=config.device)
-        agent = PpoClassic(**config.ppo.__dict__)
-        run_experiment(config, env, agent)
-
     config = SimpleNamespace(
-        device=device,
+        device='cpu',
         seed=get_seed(),
 
         env=SimpleNamespace(

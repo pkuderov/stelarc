@@ -9,20 +9,7 @@ from torch.optim.swa_utils import AveragedModel
 from stelarc.agents.utils.batch import Batch
 from stelarc.agents.utils.gae import GAE
 from stelarc.agents.utils.soft_clip import SoftClip
-
-device = torch.device(
-    "cuda:0" if torch.cuda.is_available() else
-    # "mps" if torch.mps.is_available() else
-    "cpu"
-)
-
-
-def symlog(x):
-    return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
-
-
-def symexp(x):
-    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
+from stelarc.agents.utils.torch import get_device
 
 
 class ActorCritic(nn.Module):
@@ -94,6 +81,7 @@ class PpoClassic:
             v_loss_alpha=None, ent_loss_alpha=0.1, ent_loss_alpha_decay=0.997,
             min_ent_loss_ratio=1 / 50.0,
             ema_lr=0.,
+            device=None,
     ):
         self.lr = lr
         self.betas = betas
@@ -109,6 +97,7 @@ class PpoClassic:
         self.ent_loss_alpha_decay = ent_loss_alpha_decay
         self.min_ent_loss_ratio = min_ent_loss_ratio
 
+        device = get_device(device)
         self.policy = ac_type(obs_size, hidden_size, n_actions).to(device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.lr, betas=betas)
 

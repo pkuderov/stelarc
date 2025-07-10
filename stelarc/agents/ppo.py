@@ -8,52 +8,82 @@ from torch.optim.swa_utils import AveragedModel
 
 from stelarc.agents.utils.gae import GAE
 from stelarc.agents.utils.soft_clip import SoftClip
-from stelarc.agents.utils.torch import make_layers, concat_obs_parts
+from stelarc.agents.utils.torch import make_layers, concat_obs_parts, get_ema_step_fn
 
 
 class Agent:
     def __init__(
-            self,
-            ac_type, obs_size, hidden_size, n_actions,
-            *,
-            lr, betas,
-            gamma, gae_lambda,
-            K_epochs, mini_batch_size,
-            eps_clip, v_clip=False,
-            v_loss_alpha=None, ent_loss_alpha=0.1, ent_loss_alpha_decay=0.997,
-            min_ent_loss_ratio=1 / 50.0,
-            ema_lr=0.,
-            device=None
+            self, *,
+            obs_size: int,
+            layer_topology,
+            policy_heads: list[tuple[str, int]],
+
+            # learning
+            learning_rate: float,
+            lr_decay: float,
+            lr_max_decay: float = 20.0,
+            adamw_betas: tuple[float, float],
+            mini_batch_size: int,
+            batch_epochs: int = 4,
+
+            # RL/PPO
+            discount_gamma: float = 0.99,
+            gae_lambda: float = 0.95,
+            ppo_pi_clip: float,
+            ppo_v_clip_enabled: bool = False,
+            val_loss_scale: float = 0.25,
+
+            ent_loss_scale: float = 0.1,
+            ent_loss_heads_scale: tuple[float] = (1.0, 0.2, 0.5, 0.5),
+            ent_loss_scale_decay=0.997,
+            ent_loss_scale_max_decay: float = 40.0,
+
+            weights_ema_lr: float = 0.,
+
+            # general
+            device=None,
+            seed: int = None,
     ):
-        self.lr = lr
-        self.betas = betas
-        self.gamma = gamma
-        self.gae = GAE(gamma, gae_lambda)
-        self.eps_clip = eps_clip
-        self.v_clip_enabled = v_clip
-        self.v_clip = SoftClip(eps=self.eps_clip, start_from=0.75)
-        self.K_epochs = K_epochs
+        # TODO: support random seeding
+
+        self.action_space_names, pi_head_sizes = _split_policy_heads_declaration(policy_heads)
+        print(self.action_space_names, pi_head_sizes)
+        # noinspection PyTypeChecker
+        self.model = PpoModule(
+            obs_size=obs_size,
+            pi_heads=pi_head_sizes,
+            **layer_topology
+        ).to(device)
+
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), lr=learning_rate, betas=adamw_betas
+        )
+
         self.mini_batch_size = mini_batch_size
-        self.v_loss_alpha = v_loss_alpha if v_loss_alpha is not None else 1.0
-        self.ent_loss_alpha_init = self.ent_loss_alpha = ent_loss_alpha
-        self.ent_loss_alpha_decay = ent_loss_alpha_decay
-        self.min_ent_loss_ratio = min_ent_loss_ratio
+        self.batch_epochs = batch_epochs
 
-        self.policy = ac_type(obs_size, hidden_size, n_actions).to(device)
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.lr, betas=betas)
+        self.discount_gamma = discount_gamma
+        self.gae = GAE(discount_gamma, gae_lambda)
 
-        self.ema_lr = ema_lr
-        self.ema_policy_enabled = 0.0 < ema_lr < 1.0
+        self.ppo_pi_clip = ppo_pi_clip
+        self.v_clip_enabled = ppo_v_clip_enabled
+        self.ppo_v_clip = SoftClip(eps=self.ppo_pi_clip, start_from=0.75)
+        self.val_loss_scale = val_loss_scale
+
+        self.ent_loss_heads_scale = ent_loss_heads_scale
+        self.ent_loss_scale_init = self.ent_loss_scale = ent_loss_scale
+        self.ent_loss_scale_decay = ent_loss_scale_decay
+        self.ent_loss_scale_max_decay = ent_loss_scale_max_decay
+
+        self.ema_policy_enabled = 0.0 < weights_ema_lr < 1.0
         if self.ema_policy_enabled:
-            ema_step_fn = lambda avg_model_parameter, model_parameter, _: (
-                    (1.0 - ema_lr) * avg_model_parameter + ema_lr * model_parameter
-            )
-            self.target_policy = AveragedModel(self.policy, avg_fn=ema_step_fn)
+            ema_step_fn = get_ema_step_fn(weights_ema_lr)
+            self.target_model = AveragedModel(self.model, avg_fn=ema_step_fn)
         else:
             # in case it's turned off, expose the same policy
-            self.target_policy = self.policy
+            self.target_model = self.model
 
-    def update(self, batch: Batch):
+    def update(self, batch):
         # NB: data in batch is already no-grad
         if self.ema_policy_enabled:
             with torch.no_grad():
@@ -63,10 +93,10 @@ class Agent:
                 batch.logprob = pi.log_prob(batch.a)
 
         fl_batch = batch.flatten()
-        clip = self.eps_clip
+        clip = self.ppo_pi_clip
         stats_hist = defaultdict(list)
 
-        for i_epoch in range(1, self.K_epochs + 1):
+        for i_epoch in range(1, self.batch_epochs + 1):
             for ixs in batch.split_ixs(self.mini_batch_size):
                 obs, a, orig_logprob = fl_batch.obs[ixs], fl_batch.a[ixs], fl_batch.logprob[ixs]
                 G, trunc = fl_batch.lambda_ret[ixs], fl_batch.trunc[ixs]
@@ -88,20 +118,20 @@ class Agent:
                 pi_loss = -torch.minimum(surr1, surr2).mean()
 
                 # take squared TD (MC) err,..
-                v_lr = self.v_loss_alpha
+                v_lr = self.val_loss_scale
                 sq_td_err = torch.pow(td_err, 2)
 
                 # .. then soft clip it via log ratios from policy:
                 # such clipping doesn't affect gradient flow, but rescales
                 # learning rate resulting to fast vanishing gradients for "should-be-clipped" (s,a) pairs
-                v_soft_clip_alpha, _ = self.v_clip(log_ratio.detach())
+                v_soft_clip_alpha, _ = self.ppo_v_clip(log_ratio.detach())
                 if self.v_clip_enabled:
                     v_lr = v_lr * v_soft_clip_alpha
                 # NB: apply lr before taking mean because learning rate is now sample-based
                 v_loss = torch.mean(v_lr * sq_td_err)
 
                 # calc entropy loss
-                h_lr = self.ent_loss_alpha
+                h_lr = self.ent_loss_scale
                 h_loss = -h_lr * pi.entropy().mean()
 
                 loss = pi_loss + v_loss + h_loss
@@ -111,7 +141,7 @@ class Agent:
                 nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
-                if i_epoch != self.K_epochs:
+                if i_epoch != self.batch_epochs:
                     continue
                 # save stats for logging
                 with torch.no_grad():
@@ -128,33 +158,27 @@ class Agent:
                     for k, v in zip(stats_keys, stats_vals):
                         stats_hist[k].append(torch.mean(v).item())
 
-        self.ent_loss_alpha *= self.ent_loss_alpha_decay
-        self.ent_loss_alpha = max(
-            self.ent_loss_alpha, self.ent_loss_alpha_init * self.min_ent_loss_ratio
+        self.ent_loss_scale *= self.ent_loss_scale_decay
+        self.ent_loss_scale = max(
+            self.ent_loss_scale, self.ent_loss_scale_init * self.ent_loss_scale_max_decay
         )
 
         # apply target policy slow update if enabled
         if self.ema_policy_enabled:
-            self.target_policy.update_parameters(self.policy)
+            self.target_model.update_parameters(self.policy)
         return {k: np.mean(v) for k, v in stats_hist.items()}
 
 
 class PpoModule(nn.Module):
-    layer_dims: list[int]
-
-    _lr_epoch_step: int
-    _lr_epoch_steps: int
-
     def __init__(
             self,
             obs_size: int,
             obs_encoder: list[int],
             mem_hidden_size: int,
             mem_skip_connection: bool,
+            # TODO: split into shared_body + split_body
             body: list[int],
             pi_heads: tuple[int],
-
-            seed: int = None,
     ):
         super().__init__()
         # TODO: support seeded initialisation
@@ -231,12 +255,13 @@ class PpoModule(nn.Module):
         elif self.skip_conn_option == 1:
             # add enc to proj(rnn hidden)
             rnn_proj = self.skip_conn
-            u = e + rnn_proj(h)
+            u = rnn_proj(h) + e
 
         elif self.skip_conn_option == 2:
             # enc_size == hid_size ==> simple skip conn from enc to rnn hidden
-            u = e + h
+            u = h + e
 
+        # noinspection PyUnboundLocalVariable
         return u, state
 
     def _split_pi(self, pi):
@@ -380,3 +405,8 @@ class PpoModule(nn.Module):
                 self.lr_scheduler.step()
 
         return ret_loss
+
+
+def _split_policy_heads_declaration(pi_heads: list[tuple[str, int]]) -> tuple[list[str], list[int]]:
+    head_sizes, head_names = zip(*pi_heads)
+    return list(head_names), list(head_sizes)

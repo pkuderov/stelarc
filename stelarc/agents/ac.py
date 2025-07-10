@@ -7,11 +7,6 @@ from stelarc.agents.utils.torch import make_layers, concat_obs_parts
 
 
 class RlClassifier(nn.Module):
-    layer_dims: list[int]
-
-    _lr_epoch_step: int
-    _lr_epoch_steps: int
-
     def __init__(
             self,
             obs_size: int,
