@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from torch.optim.swa_utils import AveragedModel
 
-from stelarc.agents.utils.gae import GAE
+from stelarc.agents.utils.lambda_return import LambdaReturn
 from stelarc.agents.utils.soft_clip import SoftClip
 from stelarc.agents.utils.torch import (
     make_layers, get_ema_step_fn,
@@ -69,7 +69,7 @@ class Agent:
         self.batch_epochs = batch_epochs
 
         self.discount_gamma = discount_gamma
-        self.gae = GAE(discount_gamma, gae_lambda)
+        self.lambda_return = LambdaReturn(discount_gamma, gae_lambda)
 
         self.ppo_pi_clip = ppo_pi_clip
         self.v_clip_enabled = ppo_v_clip_enabled

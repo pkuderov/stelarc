@@ -7,7 +7,7 @@ from torch import nn
 from torch.distributions import Categorical
 from torch.optim.swa_utils import AveragedModel
 
-from stelarc.agents.utils.gae import GAE
+from stelarc.agents.utils.lambda_return import LambdaReturn
 from stelarc.agents.utils.soft_clip import SoftClip
 from stelarc.agents.utils.torch import get_device
 
@@ -141,7 +141,7 @@ class Ppo:
         self.lr = lr
         self.betas = betas
         self.gamma = gamma
-        self.gae = GAE(gamma, gae_lambda)
+        self.lambda_return = LambdaReturn(gamma, gae_lambda)
         self.eps_clip = eps_clip
         self.v_clip_enabled = v_clip
         self.v_clip = SoftClip(eps=self.eps_clip, start_from=0.75)

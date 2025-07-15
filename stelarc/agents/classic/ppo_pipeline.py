@@ -42,7 +42,7 @@ def sample_batch(env, agent, batch: Batch):
     _, v = agent.target_policy(obs)
     batch.put(-1, v=v, obs=obs, term=term, trunc=trunc)
 
-    agent.gae(batch)
+    agent.lambda_return(batch)
     return obs
 
 

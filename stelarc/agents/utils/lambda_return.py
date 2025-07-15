@@ -1,9 +1,7 @@
 import torch
 
-from stelarc.agents.utils.batch import Batch
 
-
-class GAE:
+class LambdaReturn:
     """Class for TD(lambda) returns calculation.
     It's NOT GAE! I just kept the naming for convenience.
     To calc GAE, you have to subtract V[t], i.e. in vectorised form
@@ -17,7 +15,7 @@ class GAE:
         self.gamma = gamma
 
     # noinspection PyPep8Naming
-    def __call__(self, batch: Batch):
+    def __call__(self, batch):
         gamma, lambda_ = self.gamma, self.lambda_
         V, r, term, trunc = batch.v, batch.r, batch.term, batch.trunc
         # holds lambda-returns

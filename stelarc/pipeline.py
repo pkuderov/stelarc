@@ -1,14 +1,13 @@
 from collections import defaultdict
 from types import SimpleNamespace
 
-import numpy as np
 import torch
 from gymnasium.wrappers.vector import FlattenObservation
 from gymnasium.wrappers.vector.numpy_to_torch import NumpyToTorch
 from oculr.dataset import Dataset
 from oculr.env import ImageEnvironment
 
-from stelarc.agents.utils.batch import Batch, RnnBatch
+from stelarc.agents.utils.batch import RnnBatch
 from stelarc.agents.utils.torch import get_device
 from stelarc.config import ns_to_dict
 from stelarc.log import start_wandb_run, log_results
@@ -48,7 +47,7 @@ def sample_batch(env, agent, run_data):
 
     run_data.stats['n_correct'].append(n_correct)
 
-    agent.gae(batch)
+    agent.lambda_return(batch)
     return obs, state
 
 
