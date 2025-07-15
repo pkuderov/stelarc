@@ -1,6 +1,11 @@
+from __future__ import annotations
+
+from typing import Sequence
+
 import numpy as np
 import torch
 from torch import nn, optim
+from torch.distributions import Distribution, Categorical
 
 
 def get_device(device: str = None):
@@ -23,12 +28,13 @@ def symexp(x):
 
 def make_layers(
         name, input_size, layers, out_logits=False, activation=nn.SiLU,
-        print_module=True
+        dtype=torch.float32,
+        print_module=True,
 ):
     modules = []
     for output_size in layers:
         modules.extend((
-            nn.Linear(input_size, output_size, dtype=float),
+            nn.Linear(input_size, output_size, dtype=dtype),
             activation()
         ))
         input_size = output_size
@@ -79,3 +85,50 @@ class DynamicLearningRateScaler:
     @staticmethod
     def get_decay(_):
         return 0.8
+
+
+class MultiCategorical(Distribution):
+    """
+    Provide a compact way to represent and work with multi-categorical distribution,
+    i.e. with a list of Categorical distributions, such that you can work with it
+    as if it was vectorised (under the hood it is not).
+    """
+
+    def __init__(self, dists: Sequence[Categorical]):
+        super().__init__(validate_args=False)
+        self.dists = dists
+
+    def log_prob(self, values):
+        res = [
+            dist.log_prob(value)
+            for dist, value in zip(self.dists, values.unbind(-1))
+        ]
+        return torch.stack(res, dim=-1)
+
+    def entropy(self):
+        return torch.stack([d.entropy() for d in self.dists], dim=-1)
+
+    def normalised_entropy(self):
+        def _normalise(h, size):
+            return h / torch.log(h.new([size]))
+
+        return torch.stack([
+            _normalise(d.entropy(), d.probs.size(-1))
+            for d in self.dists
+        ], dim=-1)
+
+    def sample(self, sample_shape=torch.Size(), greedy=False):
+        # TODO: check if it correctly support sample_shape for both options
+        if greedy:
+            sampled = [d.mode.expand(d.mode.shape + sample_shape) for d in self.dists]
+        else:
+            sampled = [d.sample(sample_shape) for d in self.dists]
+
+        return torch.stack(sampled, dim=-1)
+
+    @staticmethod
+    def from_logits(logits: torch.Tensor, spec: Sequence[int]):
+        split_logits = torch.split(logits, list(spec), dim=-1)
+        return MultiCategorical([
+            Categorical(logits=sl) for sl in split_logits
+        ])

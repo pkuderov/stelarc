@@ -40,7 +40,7 @@ class RlClassifier(nn.Module):
 
         # enc_size -> hid_size
         # self.rnn = nn.LSTMCell(enc_size, hid_size, dtype=float)
-        self.rnn = nn.GRUCell(enc_size, mem_hidden_size, dtype=float)
+        self.rnn = nn.GRUCell(enc_size, mem_hidden_size, dtype=torch.float32)
         print('Memory: ', self.rnn)
 
         # body input is the input state for RL part,
@@ -104,7 +104,7 @@ class RlClassifier(nn.Module):
 
     def _encode(self, x, state):
         x = concat_obs_parts(x)
-        x = torch.from_numpy(x)
+        x = torch.from_numpy(x).to(torch.float32)
 
         e = self.encoder(x) if self.encoder is not None else x
         # h, _ = state = self.rnn(e, state)

@@ -6,7 +6,7 @@ def run_mnist():
     from oculr.image.buffer import PrefetchedImageBuffer
 
     from stelarc.agents.ac import RlClassifier
-    from stelarc.pipeline import run_experiment
+    from stelarc.pipeline_ac import run_experiment
 
     seed = None
     ds = Dataset('mnist', grayscale=True, center="pixel", lp_norm=2, seed=seed)
@@ -58,7 +58,7 @@ def run_cifar_grayscale():
     from oculr.image.buffer import PrefetchedImageBuffer
 
     from stelarc.agents.ac import RlClassifier
-    from stelarc.pipeline import run_experiment
+    from stelarc.pipeline_ac import run_experiment
 
     seed = None
     ds = Dataset('cifar', grayscale=True, center="pixel", seed=seed)
@@ -110,7 +110,7 @@ def run_cifar_rgb():
     from oculr.image.buffer import PrefetchedImageBuffer
 
     from stelarc.agents.ac import RlClassifier
-    from stelarc.pipeline import run_experiment
+    from stelarc.pipeline_ac import run_experiment
 
     seed = None
     ds = Dataset('cifar', grayscale=False, center="pixel", seed=seed)
@@ -155,9 +155,9 @@ def run_cifar_rgb():
 
 
 def main():
-    # run_mnist()
+    run_mnist()
     # run_cifar_grayscale()
-    run_cifar_rgb()
+    # run_cifar_rgb()
 
 
 if __name__ == '__main__':

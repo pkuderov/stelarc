@@ -15,6 +15,7 @@ from stelarc.agents.utils.batch import Batch
 from stelarc.log import start_wandb_run, log_results
 
 
+@torch.no_grad()
 def sample_batch(env, agent, batch: Batch):
     n_steps, n_envs = batch.shape
     # move last items from "previous" batch to the beginning of the current one
@@ -67,8 +68,7 @@ def run_experiment(config, env, agent):
     batch.put(-1, obs=obs, term=False, trunc=False)
 
     for elapsed_steps in range(0, max_steps + batch.size, batch.size):
-        with torch.no_grad():
-            sample_batch(env, agent, batch)
+        sample_batch(env, agent, batch)
         train_batch(agent, batch, run_data.loss_stats)
 
         if elapsed_steps >= run_data.next_log:
