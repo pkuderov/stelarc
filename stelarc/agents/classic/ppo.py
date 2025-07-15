@@ -1,4 +1,5 @@
 from collections import defaultdict
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -6,10 +7,64 @@ from torch import nn
 from torch.distributions import Categorical
 from torch.optim.swa_utils import AveragedModel
 
-from stelarc.agents.utils.batch import Batch
 from stelarc.agents.utils.gae import GAE
 from stelarc.agents.utils.soft_clip import SoftClip
 from stelarc.agents.utils.torch import get_device
+
+
+class Batch(SimpleNamespace):
+    def __init__(self, n_envs, n_steps, obs_size):
+        super().__init__()
+        self.shape = (n_steps, n_envs)
+        self.n_steps, self.n_envs = n_steps, n_envs
+        self.size = n_steps * n_envs
+
+        extra_step_shape = (n_steps + 1, n_envs)
+
+        self.obs = self.make_tensor(extra_step_shape + (obs_size, ))
+
+        self.a = self.make_tensor(dtype=torch.int)
+        self.logprob = self.make_tensor()
+        self.v = self.make_tensor(extra_step_shape)
+
+        self.r = self.make_tensor()
+        self.term = self.make_tensor(extra_step_shape, dtype=torch.bool)
+        self.trunc = self.make_tensor(extra_step_shape, dtype=torch.bool)
+        self.reset = self.make_tensor(dtype=torch.bool)
+
+        self.lambda_ret = self.make_tensor()
+
+    def put(self, i_step, **kwargs):
+        i = i_step
+        for k, v in kwargs.items():
+            self.__dict__[k][i] = v
+
+    def split_ixs(self, mini_batch_size):
+        order = torch.randperm(self.size)
+        return torch.tensor_split(order, self.size // mini_batch_size)
+
+    def flatten(self):
+        def _flatten(a):
+            return a.view(a.shape[0] * a.shape[1], *a.shape[2:])
+
+        return SimpleNamespace(
+            **{
+                k: _flatten(v[:self.n_steps])
+                for k, v in self.__dict__.items()
+                if k in {'obs', 'a', 'logprob', 'trunc', 'lambda_ret', 'z'}
+            }
+        )
+
+    def make_tensor(
+            self, shape=None, *,
+            dtype=torch.float, requires_grad=False, device=None
+    ):
+        if shape is None:
+            shape = self.shape
+        return torch.empty(
+            shape, dtype=dtype, device=device,
+            requires_grad=requires_grad
+        )
 
 
 class ActorCritic(nn.Module):
@@ -71,7 +126,7 @@ class SharedActorCritic(nn.Module):
         return pi, v.squeeze(-1)
 
 
-class PpoClassic:
+class Ppo:
     def __init__(
             self, ac_type, obs_size, hidden_size, n_actions,
             *, lr, betas,
@@ -176,9 +231,12 @@ class PpoClassic:
                 with torch.no_grad():
                     abs_td_err = torch.abs(td_err)
                     clip_ratio = (torch.abs(ratio - 1.0) > clip).float()
-                    kl_div = torch.abs(torch.exp(logprob) * log_ratio)
+                    kl_div = torch.abs(-log_ratio)
 
-                    stats_keys = ['pi', '|pi|', 'pi_clip', 'v', 'v_clip', 'h', 'kl', 'A', '|TDErr|']
+                    stats_keys = [
+                        'pi', '|pi|', 'pi_clip', 'v', 'v_clip',
+                        'h', '|kl|', 'A', '|TDErr|'
+                    ]
                     stats_vals = [
                         pi_loss, torch.abs(pi_loss), clip_ratio,
                         v_loss, v_soft_clip_alpha, h_loss, kl_div,

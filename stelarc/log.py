@@ -49,8 +49,8 @@ def log_results(
     accuracy = 100.0 * n_correct / delta_ep
     assert len(run_data.stats) == 0
 
-    _step, _sfx = _to_readable_num(step)
-    _ep, _ep_sfx = _to_readable_num(ep)
+    _step, _sfx = to_readable_num(step)
+    _ep, _ep_sfx = to_readable_num(ep)
     print(
         f'{_step:.0f}{_sfx}  [{_ep:.0f}{_ep_sfx}] {avg_sps / 1000.0:.2f} ksps'
         f'  Len: {avg_ep_len:.1f}'
@@ -74,7 +74,7 @@ def log_results(
     return avg_ret
 
 
-def _to_readable_num(x):
+def to_readable_num(x):
     suffixes = ['', 'k', 'M', 'B']
     i = 0
     while abs(x) > 1000.0 or i >= len(suffixes):

@@ -3,6 +3,7 @@ from functools import partial
 from types import SimpleNamespace
 
 import gymnasium as gym
+import numpy as np
 import torch
 from gymnasium.wrappers import FrameStackObservation
 from gymnasium.wrappers.vector import (
@@ -11,8 +12,10 @@ from gymnasium.wrappers.vector import (
 )
 from gymnasium.wrappers.vector.numpy_to_torch import NumpyToTorch
 
-from stelarc.agents.utils.batch import Batch
-from stelarc.log import start_wandb_run, log_results
+from stelarc.agents.classic.compare_envs import compare_envs
+from stelarc.agents.classic.ppo import ActorCritic, Ppo, Batch
+from stelarc.config import get_seed, set_seed, ns_to_dict
+from stelarc.log import to_readable_num, get_stats_wrapper
 
 
 @torch.no_grad()
@@ -82,6 +85,68 @@ def run_experiment(config, env, agent):
         run_data.wandb_run.finish()
 
 
+def log_results(
+        run_data, config, env
+):
+    loss_stats = run_data.loss_stats
+    env = get_stats_wrapper(env)
+    run_data.next_log += config.log.schedule
+
+    step = run_data.step
+    delta_ep = env.episode_count - run_data.ep
+    ep = run_data.ep = env.episode_count
+
+    avg_ep_len, avg_ep_t, avg_ret = 0., 0., 0.
+    if ep > 0:
+        avg_ep_len = np.mean(env.length_queue)
+        avg_ep_t = np.mean(env.time_queue)
+        avg_ret = np.mean(env.return_queue)
+
+    avg_sps = avg_ep_len * config.env.n_envs / (avg_ep_t + 1e-9)
+
+    _loss_stats = {k: np.mean(v) for k, v in loss_stats.items()}
+    loss_stats.clear()
+    loss_stats = _loss_stats
+
+    _step, _sfx = to_readable_num(step)
+    _ep, _ep_sfx = to_readable_num(ep)
+    print(
+        f'{_step:.0f}{_sfx}  [{_ep:.0f}{_ep_sfx}] {avg_sps / 1000.0:.2f} ksps'
+        f'  Len: {avg_ep_len:.1f}'
+        f'  Ret: {avg_ret:.1f}',
+        end=' |'
+    )
+    for k, v in loss_stats.items():
+        print(f'  {k}: {v:.5f}', end='')
+    print()
+
+    if run_data.wandb_run is not None:
+        metrics = {
+            'Episode': ep,
+            'Global Step': step,
+            'avgEpLen': avg_ep_len,
+            'avgRet': avg_ret,
+            'avgSPS': avg_sps,
+        } | loss_stats
+        run_data.wandb_run.log(metrics)
+
+    run_data.is_task_solved = avg_ret >= config.env.solved_reward
+    return avg_ret
+
+
+def start_wandb_run(config):
+    if not config.log.wandb:
+        return None
+    config.ac = config.agent.ac_type.__name__
+
+    import wandb
+    return wandb.init(
+        project=config.log.project,
+        tags=config.log.tags,
+        config=ns_to_dict(config),
+    )
+
+
 def make_classic_env(
         name, n_envs, max_steps, r_scale, stats_buffer_eps, device,
         **unused
@@ -119,3 +184,55 @@ def make_classic_env(
     print(f'act: {n_actions}')
 
     return env, obs_size, n_actions
+
+
+def test_ppo(env_name ="CartPole-v1"):
+    config = SimpleNamespace(
+        device='cpu',
+        seed=get_seed(),
+
+        env=SimpleNamespace(
+            name=env_name, n_envs=64, max_steps=500,
+            r_scale=0.01, stats_buffer_eps=4,
+            solved_reward=490,
+        ),
+
+        agent=SimpleNamespace(
+            ac_type=ActorCritic,
+            hidden_size=32, lr=0.001, ema_lr=0.0, betas=(0.9, 0.999),
+            gamma=0.995, gae_lambda=0.95, K_epochs=4, mini_batch_size=256,
+            eps_clip=0.1, v_clip=False,
+            v_loss_alpha=1.0, ent_loss_alpha=0.2, min_ent_loss_ratio=1 / 40.
+        ),
+
+        run=SimpleNamespace(
+            steps_range=(20_000, 500_000), n_batch_steps=16,
+        ),
+
+        log=SimpleNamespace(
+            schedule=10_000,
+            wandb=False,
+            project='ppo-v-clip-vec'
+        ),
+    )
+
+    config.env.solved_reward *= config.env.r_scale
+    config.agent.ent_loss_alpha *= config.env.r_scale
+    config.run.batch_size = config.run.n_batch_steps * config.env.n_envs
+
+    set_seed(config.seed)
+    env, obs_size, n_actions = make_classic_env(
+        **config.env.__dict__, device=config.device
+    )
+
+    config.agent.obs_size, config.agent.n_actions = obs_size, n_actions
+    agent = Ppo(**config.agent.__dict__)
+
+    print(f'{config.seed=} | {config.agent.lr=}')
+
+    run_experiment(config, env, agent)
+
+
+if __name__ == '__main__':
+    # compare_envs()
+    test_ppo()
