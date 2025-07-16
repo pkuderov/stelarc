@@ -72,15 +72,3 @@ class RnnBatch(Batch):
 
         n_rollouts = mini_batch_size // self.n_steps
         return torch.tensor_split(order, self.n_envs // n_rollouts)
-
-    def flatten(self):
-        def _flatten(a):
-            return a.view(a.shape[0] * a.shape[1], *a.shape[2:])
-
-        return SimpleNamespace(
-            **{
-                k: _flatten(v[:self.n_steps])
-                for k, v in self.__dict__.items()
-                if k in {'obs', 'a', 'logprob', 'trunc', 'lambda_ret', 'z'}
-            }
-        )

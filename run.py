@@ -29,13 +29,14 @@ def run_mnist():
             stats_buffer_eps=20,
         ),
 
-        agent=SimpleNamespace(
-            obs_size=None,
-            layer_topology=SimpleNamespace(
-                obs_encoder=[], mem_hidden_size=32, mem_skip_connection=True,
-                body=[32],
-            ),
+        model=SimpleNamespace(
+            obs_size=None, obs_encoder=[],
+            mem_hidden_size=32, mem_skip_connection=True,
+            body_shared=[], body_separate=[32],
+            policy_heads=None,
+        ),
 
+        agent=SimpleNamespace(
             learning_rate=0.003, lr_decay=None, lr_max_decay=10.0,
             adamw_betas=(0.9, 0.999),
             mini_batch_size=512, batch_epochs=2,
@@ -69,10 +70,14 @@ def run_mnist():
 
     env, test_env, obs_size, policy_heads_description = make_env(config)
 
-    config.agent.obs_size = obs_size
-    config.agent.policy_heads = policy_heads_description
+    config.model.obs_size = obs_size
+    config.model.policy_heads = policy_heads_description
+
+    from stelarc.model import Model
+    model = Model(**ns_to_dict(config.model),)
 
     agent = Agent(
+        model=model,
         seed=config.seed, device=get_device(config.device),
         **ns_to_dict(config.agent)
     )

@@ -2,12 +2,12 @@ import torch
 
 
 class LambdaReturn:
-    """Class for TD(lambda) returns calculation.
-    It's NOT GAE! I just kept the naming for convenience.
-    To calc GAE, you have to subtract V[t], i.e. in vectorised form
+    """
+    Class for TD(lambda) returns calculation.
+    To compute GAE, you have to subtract V[t], i.e. in vectorised form
         GAE = lambda_ret - V
 
-    NB: calculating lambda returns is more neat generally, since
+    NB: calculating lambda returns is generally more simple and effective, since
     it can be used for both actor (GAE) and critic (TD(lambda) target)
     """
     def __init__(self, gamma: float, lambda_: float = 0.95):
@@ -15,15 +15,15 @@ class LambdaReturn:
         self.gamma = gamma
 
     # noinspection PyPep8Naming
-    def __call__(self, batch):
+    def __call__(self, V, r, term, trunc, G, t):
         gamma, lambda_ = self.gamma, self.lambda_
-        V, r, term, trunc = batch.v, batch.r, batch.term, batch.trunc
-        # holds lambda-returns
-        G = batch.lambda_ret
-        t = batch.n_steps
-        # _tn subscript everywhere means _{t+1} (aka t next)
+        # NB1: _tn subscript everywhere means _{t+1} (aka t next)
+        # NB2: initially, XXX[t] is effectively XXX[-1], which means
+        # we grab estimates from the last timestep (full backup via V)
         G_tn = V[t]
 
+        # NB3: the whole function is meant to compute lambda returns
+        # and store them to the passed G variable
         while t > 0:
             V_tn = V[t]
             t -= 1
@@ -46,5 +46,3 @@ class LambdaReturn:
                 )
             )
             G_tn = G[t]
-
-        return G

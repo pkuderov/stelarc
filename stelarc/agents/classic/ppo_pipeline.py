@@ -42,7 +42,10 @@ def sample_batch(env, agent, batch: Batch):
     _, v = agent.target_policy(obs)
     batch.put(-1, v=v, obs=obs, term=term, trunc=trunc)
 
-    agent.lambda_return(batch)
+    agent.lambda_return(
+        V=batch.v, r=batch.r, term=batch.term, trunc=batch.trunc, G=batch.lambda_ret,
+        t=batch.n_steps
+    )
     return obs
 
 

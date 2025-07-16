@@ -47,7 +47,10 @@ def sample_batch(env, agent, run_data):
 
     run_data.stats['n_correct'].append(n_correct)
 
-    agent.lambda_return(batch)
+    agent.lambda_return(
+        V=batch.v, r=batch.r, term=batch.term, trunc=batch.trunc, G=batch.lambda_ret,
+        t=batch.n_steps
+    )
     return obs, state
 
 
