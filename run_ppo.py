@@ -6,7 +6,8 @@ def run_mnist():
 
     from stelarc.agents.ppo import Agent
     from stelarc.config import get_seed, ns_to_dict
-    from stelarc.pipeline import make_env, run_experiment
+    from stelarc.ppo_pipeline import run_experiment
+    from stelarc.make_env import make_env
     from stelarc.agents.utils.torch import get_device
 
     seed = None
