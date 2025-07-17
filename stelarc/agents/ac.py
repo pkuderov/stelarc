@@ -1,275 +1,179 @@
+from collections import defaultdict
+
 import numpy as np
 import torch
-from torch import nn, optim
-from torch.distributions import Categorical
+from torch import nn
 
-from stelarc.agents.utils.torch import make_layers, concat_obs_parts
+from stelarc.agents.utils.lambda_return import LambdaReturn, RlFlags
+from stelarc.agents.utils.torch import DynamicLearningRateScaler
+from stelarc.model import Model
 
 
-class RlClassifier(nn.Module):
+class Agent(nn.Module):
     def __init__(
-            self,
-            obs_size: int,
-            obs_encoder: list[int],
-            mem_hidden_size: int,
-            mem_skip_connection: bool,
-            body: list[int],
-            pi_heads: tuple[int],
+            self, *,
+            model: Model,
+
+            # learning
             learning_rate: float,
-            gamma: float,
-            batch_size: int = 64,
+            lr_min: float = 20.0,
+            lr_decay_slope: float = 1.0,
+            lr_decay_speed: float = 1.0,
+            adamw_betas: tuple[float, float] = (0.9, 0.999),
+
+            # RL/Losses
+            discount_gamma: float = 0.99,
+            gae_lambda: float = None,
             val_loss_scale: float = 0.25,
-            ent_scales: tuple[float] = (1.0, 1.0, 1.0, 1.0),
-            ent_loss_scale: float = 0.001,
+
+            ent_loss_scale: float = 0.1,
+            ent_loss_heads_scale: tuple[float] = (1.0, 0.2, 0.5, 0.5),
+            ent_loss_scale_decay=1.0,
+            ent_loss_scale_max_decay: float = 1.0,
+
+            # general
+            device=None,
             seed: int = None,
-            min_lr_scale: float = 20.0
+            dtype=torch.float32,
     ):
         super().__init__()
-        self.rng = np.random.default_rng(seed)
-        self.lr = learning_rate
-        self.n_classes = pi_heads[1]
-        self.gamma = gamma
+        # TODO: support random seeding
+
+        self.device = device
+        self.obs_size = model.obs_size
+        self.action_size = model.action_size
+
+        self.action_names = model.action_names
+        self.model = model.to(device)
+
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), lr=learning_rate, betas=adamw_betas
+        )
+        self.lr_scheduler = DynamicLearningRateScaler(
+            self.optimizer, learning_rate,
+            min_lr=lr_min, slope=lr_decay_slope, speed=lr_decay_speed
+        )
+
+        self.discount_gamma = discount_gamma
+        self.lambda_return = LambdaReturn(discount_gamma, gae_lambda)
+
         self.val_loss_scale = val_loss_scale
-        self.ent_loss_scale = ent_loss_scale
-        self.ent_scales = ent_scales
-        self._pi_heads = pi_heads
-        self._pi_head_shifts = np.cumsum(pi_heads)
 
-        # [optional] input_size -> enc_size
-        enc_size, self.encoder = make_layers('Encoder', obs_size, obs_encoder)
+        self.ent_loss_scale_init = self.ent_loss_scale = ent_loss_scale
+        self.ent_loss_scale_decay = ent_loss_scale_decay
+        self.ent_loss_scale_max_decay = ent_loss_scale_max_decay
 
-        # enc_size -> hid_size
-        # self.rnn = nn.LSTMCell(enc_size, hid_size, dtype=float)
-        self.rnn = nn.GRUCell(enc_size, mem_hidden_size, dtype=torch.float32)
-        print('Memory: ', self.rnn)
+        ent_loss_heads_scale = np.array(ent_loss_heads_scale)
+        self.ent_loss_heads_scale = torch.from_numpy(ent_loss_heads_scale).to(dtype=dtype)
 
-        # body input is the input state for RL part,
-        #   it aggregates observation + rnn state
-        body_input_size = mem_hidden_size
-
-        # [optional] skip connection from input to body bypassing rnn,
-        #   and is added to rnn output
-        self.skip_conn = None
-        self.skip_conn_option = None
-        if mem_skip_connection:
-            if self.encoder is None:
-                # no encoder: input_size -> hid_size (+ rnn output)
-                self.skip_conn_option = 0
-                _, self.skip_conn = make_layers(
-                    'Mem skip connection', obs_size, [mem_hidden_size]
-                )
-
-            elif enc_size != mem_hidden_size:
-                # has encoder, rnn input and hidden has diff size.
-                #   I expect hidden > input ==> add projection layer to rnn and skip conn
-                #   from enc to the output of the projection layer
-                self.skip_conn_option = 1
-                body_input_size, self.skip_conn = make_layers(
-                    'Mem output projection', mem_hidden_size, [enc_size]
-                )
-            else:
-                # has encoder, enc_size == hid_size ==> can pass enc via skip connection
-                #   w/o any additional layers
-                self.skip_conn_option = 2
-
-        pi_enc_size, self.pi_body = make_layers('Policy body', body_input_size, body)
-        val_enc_size, self.val_body = make_layers('Value body', body_input_size, body)
-
-        _, self.pi_head = make_layers(
-            'Policy heads', pi_enc_size, [sum(pi_heads)], out_logits=True
-        )
-        _, self.val_head = make_layers(
-            'Value head', val_enc_size, [1], out_logits=True
-        )
-
-        # TODO: check if should be configurable
-        self.body_skip = pi_enc_size == val_enc_size == body_input_size and len(body) > 0
-
-        self.optim = optim.AdamW(self.parameters(), lr=self.lr)
-        self.mse = nn.MSELoss()
-
-        self.batch_size = batch_size
         self._loss = 0.
         self._last_loss = 0.
         self._batch_cnt = 0
 
-        self._min_lr = self.lr / min_lr_scale
-        self._lr_epoch = lambda lr: int(7.0 / lr)
-        self._lr_scaler = lambda _: 0.8
-        self.lr_scheduler = optim.lr_scheduler.MultiplicativeLR(
-            self.optim, lr_lambda=self._lr_scaler,
-        )
-        self._lr_epoch_step = 0
-        self._lr_epoch_steps = self._lr_epoch(self.lr)
-
-    def _encode(self, x, state):
-        x = concat_obs_parts(x)
-        x = torch.from_numpy(x).to(torch.float32)
-
-        e = self.encoder(x) if self.encoder is not None else x
-        # h, _ = state = self.rnn(e, state)
-        h = state = self.rnn(e, state)
-
-        if self.skip_conn_option is None:
-            # no skip connection
-            u = h
-
-        elif self.skip_conn_option == 0:
-            # add mlp(input) to rnn hidden
-            u = h + self.skip_conn(x)
-
-        elif self.skip_conn_option == 1:
-            # add enc to proj(rnn hidden)
-            rnn_proj = self.skip_conn
-            u = e + rnn_proj(h)
-
-        elif self.skip_conn_option == 2:
-            # enc_size == hid_size ==> simple skip conn from enc to rnn hidden
-            u = e + h
-
-        return u, state
-
-    def _split_pi(self, pi):
-        mv, cl, r, c = self._pi_head_shifts
-        return (
-            pi[..., :mv], pi[..., mv:cl],
-            pi[..., cl:r], pi[..., r:c],
-        )
-
-    def _predict(self, x, state, greedy=False):
-        z, state = self._encode(x, state)
-
-        u = self.pi_body(z) if self.pi_body is not None else z
-        if self.body_skip:
-            u = u + z
-        pi = self.pi_head(u)
-
-        v = self.val_body(z) if self.val_body is not None else z
-        if self.body_skip:
-            v = v + z
-        val = self.val_head(v).squeeze()
-
-        # zma == zoom out|move|answer
-        zma, cl, row, col = self._split_pi(pi)
-        zma_distr = Categorical(logits=zma)
-        class_distr = Categorical(logits=cl)
-        row_distr = Categorical(logits=row)
-        col_distr = Categorical(logits=col)
-
-        a_zma = torch.argmax(zma, -1) if greedy else zma_distr.sample()
-        a_cl = torch.argmax(cl, -1) if greedy else class_distr.sample()
-        a_row = torch.argmax(row, -1) if greedy else row_distr.sample()
-        a_col = torch.argmax(col, -1) if greedy else col_distr.sample()
-
-        result = dict(
-            state=state,
-            val=val,
-            a_zma=a_zma, a_class=a_cl,
-            a_row=a_row, a_col=a_col,
-
-            zma_log_prob=zma_distr.log_prob(a_zma),
-            class_log_prob=class_distr.log_prob(a_cl),
-            row_log_prob=row_distr.log_prob(a_row),
-            col_log_prob=col_distr.log_prob(a_col),
-
-            zma_entropy=zma_distr.entropy(),
-            class_entropy=class_distr.entropy(),
-            row_entropy=row_distr.entropy(),
-            col_entropy=col_distr.entropy(),
-        )
-
-        return result
-
-    def _evaluate(self, x, state):
-        z, state = self._encode(x, state)
-
-        u = self.val_body(z) if self.val_body is not None else z
-        if self.body_skip:
-            u = u + z
-
-        val = self.val_head(u).squeeze()
-        return val, state
-
     def forward(self, x, state=None):
-        return self._predict(x, state)
+        # outer no_grads have higher priority: to have an ability to
+        # calc in no_grad mode something during training
+        enable_grads = torch.is_grad_enabled() and self.training
+        with torch.set_grad_enabled(enable_grads):
+            return self.model(x, state)
 
-    def predict(self, x, state=None, train=True, greedy=False):
-        if train:
-            return self._predict(x, state)
+    @torch.no_grad()
+    def evaluate(self, x, state=None):
+        return self.model.evaluate(x, state)
 
-        with torch.no_grad():
-            return self._predict(x, state, greedy=greedy)
+    # noinspection PyPep8Naming
+    def update(self, batch):
+        stats_hist = defaultdict(list)
 
-    def learn(self, obs, r, a, obs_next, done, reset_mask):
-        batch_size = len(done)
-        gamma = self.gamma
-        done = torch.from_numpy(done).float()
-        # done -> reset transition samples are disabled
-        enabled = torch.logical_not(torch.from_numpy(reset_mask))
-        r = torch.from_numpy(r)
-        state = a['state']
-        zma = a['a_zma']
-        v_s = a['val']
+        def _slice(ix, mask, *args):
+            return (x[ix][mask] for x in args)
 
-        move_mask = zma == 1
-        ans_mask = zma == 2
-        log_pi = (
-                a['zma_log_prob']
-                + torch.where(move_mask, a['row_log_prob'] + a['col_log_prob'], 0.0)
-                + torch.where(ans_mask, a['class_log_prob'], 0.0)
-        )
-        log_pi = log_pi[enabled]
+        loss = 0.
+        for t in range(batch.n_steps):
+            flags_tn = batch.flags[t]
+            reset_tn = flags_tn & RlFlags.RESET
+            # we exclude T -> 0 between-two-episodes transitions
+            enabled = torch.logical_not(reset_tn.bool())
 
-        with torch.no_grad():
-            v_sn, _ = self._evaluate(obs_next, state)
-            td_tar = r + gamma * (1 - done) * v_sn
-
-        td_err = td_tar - v_s
-        td_err = td_err[enabled]
-
-        pi_heads_entropy = [
-            a['zma_entropy'], a['class_entropy'],
-            a['row_entropy'], a['col_entropy'],
-        ]
-
-        v_loss = torch.mean(torch.pow(td_err, 2))
-        pi_loss = -torch.mean(log_pi * td_err.detach())
-        ent_loss = -sum(
-            scale * _normalize_entropy(torch.mean(entropy[enabled]), size)
-            for scale, size, entropy in zip(
-                self.ent_scales, self._pi_heads, pi_heads_entropy
+            a, logprob, entropy, V, G = _slice(
+                t, enabled, batch.a, batch.logprob, batch.entropy, batch.v, batch.lambda_ret
             )
+
+            assert not G.requires_grad and V.requires_grad
+            td_err = G - V
+            A = td_err.detach()
+
+            act_type = a[..., 0]
+            _, move_mask, ans_mask = self.model.split_action_type(act_type, move=True, answer=True)
+            log_pi = self.model.get_log_pi(logprob, move_mask=move_mask, ans_mask=ans_mask)
+
+            pi_loss = -torch.mean(log_pi * A)
+
+            # print(act_type)
+            # print('M', move_mask)
+            # print('A', ans_mask)
+            # print(logprob)
+            # print(log_pi)
+            # print('=======')
+
+            v_scale = self.val_loss_scale
+            v_loss = v_scale * torch.square(td_err).mean()
+
+            # entropy loss
+            h_scale = self.ent_loss_scale
+            # weighted sum over the action heads
+            h_aggregated = torch.mv(entropy, self.ent_loss_heads_scale)
+            h_loss = -h_scale * h_aggregated.mean()
+
+            loss += pi_loss + v_loss + h_loss
+
+        loss /= batch.n_steps
+        self.optimizer.zero_grad()
+        loss.backward()
+        # nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        self.optimizer.step()
+
+        # save stats for logging
+        with torch.no_grad():
+            # abs_td_err = torch.abs(td_err)
+            abs_td_err = v_loss / v_scale
+
+            stats_keys = [
+                'pi',
+                # '|pi|',
+                'v', 'h',
+                # 'A',
+                # '|TDErr|'
+            ]
+            stats_vals = [
+                pi_loss,
+                # torch.abs(pi_loss),
+                v_loss, h_loss,
+                # A,
+                # abs_td_err,
+            ]
+            for k, v in zip(stats_keys, stats_vals):
+                stats_hist[k].append(torch.mean(v).item())
+
+        self.decay_ent_los_scale()
+        self.lr_scheduler.step()
+
+        return {k: np.mean(v) for k, v in stats_hist.items()}
+
+    def decay_ent_los_scale(self):
+        self.ent_loss_scale *= self.ent_loss_scale_decay
+        self.ent_loss_scale = max(
+            self.ent_loss_scale, self.ent_loss_scale_init / self.ent_loss_scale_max_decay
         )
-        loss = pi_loss + self.val_loss_scale * v_loss + self.ent_loss_scale * ent_loss
 
-        ret_loss = pi_loss.detach().item(), v_loss.detach().item()
-
-        self._batch_cnt += batch_size
-        self._loss += loss
-
-        if self._batch_cnt >= self.batch_size:
-            self._loss /= round(self._batch_cnt / batch_size)
-            self._last_loss += 0.05 * (self._loss.detach().item() - self._last_loss)
-            self._loss.backward()
-            self.optim.step()
-            self.optim.zero_grad()
-
-            self._batch_cnt = 0
-            self._loss = 0.
-
-            # h_st, c_st = state
-            # a['state'] = h_st.detach(), c_st.detach()
-            a['state'] = state.detach()
-
-            self._lr_epoch_step += 1
-            if self.lr > self._min_lr and self._lr_epoch_step >= self._lr_epoch_steps:
-                self.lr *= self._lr_scaler(True)
-                self._lr_epoch_step = 0
-                self._lr_epoch_steps = self._lr_epoch(self.lr)
-                # print(f'New LR: {self.lr:.5f} for {self._lr_epoch_steps} steps')
-                self.lr_scheduler.step()
-
-        return ret_loss
+    @staticmethod
+    def reset_state(state, reset_mask):
+        if isinstance(reset_mask, np.ndarray):
+            reset_mask = torch.from_numpy(reset_mask)
+        not_done = np.logical_not(reset_mask).view(-1, 1)
+        state = state * not_done
+        # state = torch.where(reset_mask.view(-1, 1), 0.0, state)
+        return state
 
 
 def _normalize_entropy(h, size):
@@ -287,44 +191,3 @@ def _get_entropy(p, dim=-1, keepdim=False, normalize=False):
     H = _entr(p) if not single_val else _entr(p) + _entr(1.0 - p)
     n = max(2, p.shape[dim])
     return H / torch.log(H.new([n]))
-
-
-def test_ac_compilation():
-    from functools import partial
-    import numpy as np
-
-    from oculr.dataset import Dataset
-    from oculr.env import ImageEnvironment
-    from oculr.image.buffer import PrefetchedImageBuffer
-
-    seed = 8041990
-    ds = Dataset( 'mnist', grayscale=True, lp_norm=None, seed=seed)
-    env = ImageEnvironment(
-        ds, num_envs=2, obs_hw_shape=7, max_time_steps=20, seed=42,
-        answer_reward=(1.0, -0.3), step_reward=-0.01,
-        img_buffer_fn=partial(PrefetchedImageBuffer, prefetch_size=256),
-    )
-    o, info = env.reset()
-    o, r, terminated, truncated, info = env.step(
-        np.array([
-            [1, 0, 5, 10],
-            [0, 10, 4, 6],
-        ])
-    )
-
-    agent = RlClassifier(
-        obs_size=env.total_obs_size,
-        obs_encoder=[32], mem_hidden_size=64, mem_skip_connection=True, body=[32],
-        pi_heads=(
-            3, env.n_classes, *env.pos_range[1]
-        ),
-        learning_rate=0.05,
-        gamma=0.95,
-        batch_size=64,
-        seed=seed,
-    )
-    _ = agent.predict(o)
-
-
-if __name__ == '__main__':
-    test_ac_compilation()

@@ -1,14 +1,16 @@
+from functools import partial
+from types import SimpleNamespace
+
+from oculr.image.buffer import PrefetchedImageBuffer
+
+from stelarc.agents.ppo import Agent
+from stelarc.config import get_seed, ns_to_dict
+from stelarc.ppo_pipeline import run_experiment
+from stelarc.make_env import make_env
+from stelarc.agents.utils.torch import get_device
+
+
 def run_mnist():
-    from functools import partial
-    from types import SimpleNamespace
-
-    from oculr.image.buffer import PrefetchedImageBuffer
-
-    from stelarc.agents.ppo import Agent
-    from stelarc.config import get_seed, ns_to_dict
-    from stelarc.ppo_pipeline import run_experiment
-    from stelarc.make_env import make_env
-    from stelarc.agents.utils.torch import get_device
 
     seed = None
 

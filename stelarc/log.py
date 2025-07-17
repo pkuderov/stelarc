@@ -46,8 +46,15 @@ def log_results(
     loss_stats = _loss_stats
 
     n_correct = np.sum(run_data.stats.pop('n_correct'))
-    accuracy = 100.0 * n_correct / delta_ep
+    n_done = np.sum(run_data.stats.pop('n_done'))
+
+    assert n_done == delta_ep, f'{n_done=} != {delta_ep}'
+    accuracy = 100.0 * n_correct / n_done
     assert len(run_data.stats) == 0
+
+    act_type_freq = run_data.act_type_stats
+    act_type_freq = (100 * act_type_freq / act_type_freq.sum()).astype(int)
+    run_data.act_type_stats[:] = 0
 
     _step, _sfx = to_readable_num(step)
     _ep, _ep_sfx = to_readable_num(ep)
@@ -55,7 +62,8 @@ def log_results(
         f'{_step:.0f}{_sfx}  [{_ep:.0f}{_ep_sfx}] {avg_sps / 1000.0:.2f} ksps'
         f'  Len: {avg_ep_len:.1f}'
         f'  Acc: {accuracy:.1f}'
-        f'  Ret: {avg_ret:.1f}',
+        f'  Ret: {avg_ret:.1f}'
+        f'  Typ: {act_type_freq}',
         end=' |'
     )
     for k, v in loss_stats.items():

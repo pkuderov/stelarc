@@ -1,119 +1,165 @@
 from collections import defaultdict
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
-
-def _append_results(agg_results, res):
-    for k in res:
-        agg_results[k].append(res[k])
+from stelarc.agents.utils.lambda_return import RlFlags
+from stelarc.log import start_wandb_run, log_results
 
 
-def _to_readable_num(x):
-    suffixes = ['', 'k', 'M', 'B']
-    i = 0
-    while abs(x) > 1000.0 or i >= len(suffixes):
-        x = x / 1000.0
-        i += 1
+class Batch:
+    def __init__(self, n_envs, n_steps):
+        super().__init__()
+        self.shape = (n_steps, n_envs)
+        self.n_steps, self.n_envs = n_steps, n_envs
+        self.size = n_steps * n_envs
 
-    return x, suffixes[i]
+        self.a = []
+        self.logprob = []
+        self.entropy = []
+        self.v = []
+        self.r = []
+        self.flags = []
 
+        self.lambda_ret = []
 
-def run_epoch(
-        env, agent, *, full_state, epoch, n_steps, total_steps, is_train=True, is_greedy=False
-):
-    o, state = full_state
-    greedy = (not is_train) and is_greedy
-    ret, ep_len_sum, n_eps, v_loss, pi_loss, acc = 0., 0., 0., 0., 0., 0.
+    def put(self, **kwargs):
+        for k, v in kwargs.items():
+            self.__dict__[k].append(v)
 
-    for i in range(1, n_steps + 1):
-        a_agent = agent.predict(o, state, train=is_train, greedy=greedy)
-        a_env = _get_numpy_action(a_agent)
-        o_next, r, terminated, truncated, info = env.step(a_env)
-        reset_mask = info['reset_mask']
-        if is_train:
-            loss = agent.learn(o, r, a_agent, o_next, terminated, reset_mask)
+    def clear(self):
+        for _, v in self.__dict__.items():
+            if isinstance(v, list):
+                v.clear()
 
-        ret += r.mean()
-        ep_len_sum += info['ep_len_sum']
-        acc += info['n_correct']
-        n_eps += info['n_done']
-        if is_train:
-            # noinspection PyUnboundLocalVariable
-            pi_loss += loss[0]
-            v_loss += loss[1]
-
-        o = o_next
-        state = _reset_state(a_agent['state'], reset_mask)
-
-    if is_train:
-        pi_loss /= n_steps
-        v_loss /= n_steps
-
-    ret /= n_steps
-    ep_len_sum /= n_eps
-    acc /= n_eps / 100.0
-
-    if is_train:
-        total_steps += n_steps
-
-        tot, sfx = _to_readable_num(total_steps * env.num_envs)
-        print(
-            f'{epoch} [{tot:.0f}{sfx}]: {acc:.2f} {ret:.3f}  '
-            f'|  {ep_len_sum:.1f}  {n_eps}  '
-            f'|  {pi_loss:.4f}   {v_loss:.4f}'
-        )
+    @staticmethod
+    def to_flags(term, trunc, reset):
+        # bitwise OR is same as sum here
         return (
-            total_steps, (o, state),
-            dict(acc=acc, ret=ret, ep_len=ep_len_sum, pi_loss=pi_loss, v_loss=v_loss)
+            RlFlags.TERMINATED * term
+            | RlFlags.TRUNCATED * trunc
+            | RlFlags.RESET * reset
         )
 
-    print(f'==>  {acc:.2f} {ret:.3f}  |  {ep_len_sum:.1f}  {n_eps}')
-    return (o, state), dict(acc=acc, ret=ret, ep_len=ep_len_sum)
+
+class State:
+    def __init__(self):
+        self.obs = None
+        self.mem_state = None
 
 
-def run_experiment(
-        env, test_env, agent, n_epochs, n_steps, eval_configs,
-):
-    train_results = defaultdict(list)
-    test_results = defaultdict(list)
+def sample_batch(env, agent, run_data):
+    batch = run_data.batch
+    state = run_data.state
 
-    total_steps = 0
-    full_state = (env.reset()[0], None)
-    test_full_state = (test_env.reset()[0], None)
+    n_steps, n_envs = batch.shape
+    obs, mem_state = state.obs, state.mem_state
+    assert len(batch.v) == 0
+
+    n_correct = 0
+    n_done = 0
+    for i in range(n_steps):
+        # use target policy for acting
+        pi, v, mem_state = agent(obs, mem_state)
+        a = pi.sample()
+        logprob = pi.log_prob(a)
+        entropy = pi.normalised_entropy()
+
+        obs_tn, reward, term_tn, trunc_tn, info = env.step(a.cpu())
+
+        reset_tn = info['reset_mask']
+        flags = batch.to_flags(term=term_tn, trunc=trunc_tn, reset=reset_tn)
+
+        np.add.at(run_data.act_type_stats, a[..., 0][~reset_tn.numpy()], 1)
+
+        # print(f'F:', flags.numpy())
+        # print(f'R:', reward.numpy())
+        # print(f'V:', v.detach().numpy())
+
+        batch.put(
+            a=a, logprob=logprob, entropy=entropy,
+            r=reward, v=v, flags=flags
+        )
+        n_correct += info['n_correct']
+        n_done += info['n_done']
+
+        obs = obs_tn
+        mem_state = agent.reset_state(mem_state, reset_tn)
+
+    # save state, note memory state detach
+    state.obs, state.mem_state = obs, mem_state.detach()
+
+    # get value-based backups for lambda returns for the last step computation
+    # NB: notice no-grad and no mem state mutation! Next batch, we will call
+    #   an agent with the same input, but w/ updated model and grads enabled
+    v = agent.evaluate(obs, mem_state)
+    batch.put(v=v)
+
+    run_data.stats['n_correct'].append(n_correct)
+    run_data.stats['n_done'].append(n_done)
+    agent.lambda_return(
+        V=batch.v, r=batch.r, flags=batch.flags, G=batch.lambda_ret, t=batch.n_steps
+    )
+    # print(f'G:', batch.lambda_ret[0].numpy(), batch.lambda_ret[1].numpy())
+    # these aren't needed after returns calculation
+    batch.r.clear()
+
+
+def train_batch(agent, batch, loss_stats):
+    new_loss_stats = agent.update(batch)
+    for k, v in new_loss_stats.items():
+        loss_stats[k].append(v)
+
+
+def train_epoch(env, agent, run_data, config):
+    batch = run_data.batch
+    n_batches = config.run.n_batches
+
+    for i in range(n_batches):
+        sample_batch(env, agent, run_data)
+        train_batch(agent, batch, run_data.loss_stats)
+        batch.clear()
+
+        run_data.step += batch.size
+        if run_data.step >= run_data.next_log:
+            log_results(run_data, config, env)
+
+
+def run_experiment(config, env, agent, test_env=None):
+    n_epochs = config.run.n_epochs
+    eval_configs = config.run.eval_configs
+    run_data = SimpleNamespace(
+        step=0, ep=0, next_log=config.log.schedule,
+        batch=Batch(
+            n_envs=config.env.num_envs, n_steps=config.run.n_batch_steps,
+        ),
+        state=State(),
+        # test_batch=Batch(
+        #     n_envs=config.env.num_envs, n_steps=config.run.n_batch_steps,
+        #     obs_size=config.agent.obs_size,
+        # ),
+        loss_stats=defaultdict(list),
+        stats=defaultdict(list),
+        act_type_stats=np.zeros(3, dtype=int),
+        test_loss_stats=defaultdict(list),
+        wandb_run=start_wandb_run(config),
+    )
+
+    obs_t, _, = env.reset(seed=config.seed)
+    run_data.state.obs = obs_t
 
     for epoch in range(1, n_epochs + 1):
-        if n_steps > 0:
-            total_steps, full_state, res = run_epoch(
-                env, agent, full_state=full_state,
-                epoch=epoch, n_steps=n_steps, total_steps=total_steps,
-                is_train=True, is_greedy=False,
-            )
-            _append_results(train_results, res)
+        train_epoch(env=env, agent=agent, run_data=run_data, config=config)
 
         for eval_config in eval_configs:
-            test_full_state, res = run_epoch(
-                test_env, agent, full_state=test_full_state,
-                epoch=epoch, total_steps=total_steps,
-                is_train=False, **eval_config
-            )
-            _append_results(test_results, res)
+            # test_full_state, res = run_epoch(
+            #     test_env, agent, full_state=test_full_state,
+            #     epoch=epoch, total_steps=total_steps,
+            #     is_train=False, **eval_config
+            # )
+            # _append_results(test_results, res)
+            ...
 
-
-def _get_numpy_action(res):
-    return np.vstack([
-        res['a_zma'].numpy(),
-        res['a_class'].numpy(),
-        res['a_row'].numpy(), res['a_col'].numpy()
-    ]).T
-
-
-def _reset_state(state, reset_mask):
-    # TODO: use torch.where + init_state fixed random vector
-    not_done = np.logical_not(reset_mask)
-    not_done = torch.from_numpy(not_done).reshape(-1, 1)
-    # h, c = state
-    # h = h * not_done
-    # c = c * not_done
-    # return h, c
-    return state * not_done
+    if run_data.wandb_run is not None:
+        run_data.wandb_run.finish()

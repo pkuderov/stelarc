@@ -11,7 +11,8 @@ def make_env(config):
     ds_config = ns_to_dict(config.ds)
     env_config = ns_to_dict(config.env)
     seed = config.seed
-    device = get_device(config.device)
+    # device = get_device(config.device)
+    device = get_device('cpu')
 
     stats_buffer_eps = env_config.pop('stats_buffer_eps', None)
     ds = Dataset(seed=seed, **ds_config)
@@ -35,7 +36,8 @@ def make_env(config):
 
     num_envs, obs_size = env.observation_space.shape
     policy_heads_description = env.metadata['action_space_description']
+    action_types_description = env.metadata['action_types_description']
     single_action_space = env.single_action_space
     print(f'obs: {obs_size}    act: {single_action_space}    num_envs: {num_envs}')
 
-    return env, test_env, obs_size, policy_heads_description
+    return env, test_env, obs_size, policy_heads_description, action_types_description

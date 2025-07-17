@@ -21,6 +21,7 @@ class Model(nn.Module):
             body_skip_connection: bool = False,
 
             policy_heads: Sequence[tuple[str, int]],
+            action_types: dict[str, int],
 
             dtype=torch.float32
     ):
@@ -32,6 +33,9 @@ class Model(nn.Module):
 
         print(policy_heads)
         self.action_names, policy_head_sizes = _split_policy_heads_declaration(policy_heads)
+        self._act_zoom = action_types['zoom']
+        self._act_move = action_types['move']
+        self._act_answer = action_types['answer']
 
         self.n_classes = policy_head_sizes[1]
         self._pi_heads = policy_head_sizes
@@ -108,9 +112,25 @@ class Model(nn.Module):
     def forward(self, x, state=None):
         return self._predict(x, state)
 
+    def _predict(self, x, state):
+        z, state = self._encode(x, state)
+        s = _fw(self.shared_body, z)
+
+        u = _fw(self.pi_body, s)
+        if self.body_skip:
+            u = u + z
+        pi = self.pi_head(u)
+
+        v = _fw(self.val_body, s)
+        if self.body_skip:
+            v = v + z
+        val = self.val_head(v).squeeze()
+
+        pi_distr = MultiCategorical.from_logits(logits=pi, spec=self._pi_heads)
+        return pi_distr, val, state
+
     def _encode(self, x, state):
         e = _fw(self.encoder, x)
-        # h, _ = state = self.rnn(e, state)
         h = state = self.rnn(e, state)
 
         if self.skip_conn_option is None:
@@ -133,24 +153,8 @@ class Model(nn.Module):
         # noinspection PyUnboundLocalVariable
         return u, state
 
-    def _predict(self, x, state):
-        z, state = self._encode(x, state)
-        s = _fw(self.shared_body, z)
-
-        u = _fw(self.pi_body, s)
-        if self.body_skip:
-            u = u + z
-        pi = self.pi_head(u)
-
-        v = _fw(self.val_body, s)
-        if self.body_skip:
-            v = v + z
-        val = self.val_head(v).squeeze()
-
-        pi_distr = MultiCategorical.from_logits(logits=pi, spec=self._pi_heads)
-        return pi_distr, val, state
-
-    def _evaluate(self, x, state):
+    @torch.no_grad()
+    def evaluate(self, x, state=None):
         z, state = self._encode(x, state)
         s = _fw(self.shared_body, z)
 
@@ -158,16 +162,25 @@ class Model(nn.Module):
         if self.body_skip:
             v = v + z
         val = self.val_head(v).squeeze()
-        return val, state
+        return val
 
     @staticmethod
-    def get_log_pi(log_prob, ans_mask, move_mask):
-        log_pi = (
-                log_prob[..., 0]
-                + torch.where(ans_mask, log_prob[..., 1], 0.0)
-                + torch.where(move_mask, log_prob[..., 2:].sum(-1), 0.0)
+    def get_log_pi(log_prob, *, move_mask, ans_mask):
+        return (
+            log_prob[..., 0]
+            + torch.where(ans_mask, log_prob[..., 1], 0.0)
+            + torch.where(move_mask, log_prob[..., 2] + log_prob[..., 3], 0.0)
         )
-        return log_pi
+
+    def split_action_type(self, act_type, zoom=False, move=False, answer=False):
+        zoom_mask, move_mask, answer_mask = None, None, None
+        if zoom:
+            zoom_mask = act_type == self._act_zoom
+        if move:
+            move_mask = act_type == self._act_move
+        if answer:
+            answer_mask = act_type == self._act_answer
+        return zoom_mask, move_mask, answer_mask
 
 
 def _fw(module, x):

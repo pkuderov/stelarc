@@ -12,7 +12,7 @@ def get_device(device: str = None):
     if device is None:
         device = (
             "cuda:0" if torch.cuda.is_available() else
-            # "mps" if torch.mps.is_available() else
+            "mps" if torch.mps.is_available() else
             "cpu"
         )
     return torch.device(device)
@@ -68,23 +68,58 @@ def get_ema_step_fn(weights_ema_lr):
 
 
 class DynamicLearningRateScaler:
-    def __init__(self, optimiser, learning_rate, decay, max_decay_scale):
+    base_decay: float = 0.5
+    base_decay_schedule: float = 2.0
+
+    def __init__(
+            self, optimiser, learning_rate, *,
+
+            # min LR can be defined either with a value
+            #   < 1.0: abs min LR value
+            #   >= 1.0: rel to initial, i.e. "init LR" / "min LR"
+            #           (e.g. 10.0 means min LR ten times smaller)
+            min_lr: float,
+
+            # normalised params that determine the strength
+            # of LR decay (higher slope — stronger decay)
+            # and how quickly it reaches min LR (higher — faster)
+            slope: float = 1.0, speed: float = 1.0
+    ):
         self.lr = learning_rate
-        self._min_lr = self.lr / max_decay_scale
+        if min_lr < 1.0:
+            self.min_lr = min_lr
+        else:
+            self.min_lr = self.lr / min_lr
+
+        self.decay = self.base_decay ** slope
+        self.speed = self.base_decay_schedule / speed
 
         self.lr_scheduler = optim.lr_scheduler.MultiplicativeLR(
             optimiser, lr_lambda=self.get_decay,
         )
-        self._lr_epoch_step = 0
-        self._lr_epoch_steps = self.get_steps_in_epoch(learning_rate)
+        self.epoch_step = 0
+        self.n_epoch_steps = self.get_steps_in_epoch()
+        print(f'Init LR: {self.lr:.5f} for {self.n_epoch_steps} steps')
 
-    @staticmethod
-    def get_steps_in_epoch(lr):
-        return int(7.0 / lr)
+    def step(self):
+        self.epoch_step += 1
 
-    @staticmethod
-    def get_decay(_):
-        return 0.8
+        enough = self.lr < self.min_lr
+        early = self.epoch_step < self.n_epoch_steps
+        if enough or early:
+            return
+
+        self.lr_scheduler.step()
+        self.lr *= self.decay
+        self.epoch_step = 0
+        self.n_epoch_steps = self.get_steps_in_epoch()
+        print(f'New LR: {self.lr:.5f} for {self.n_epoch_steps} steps')
+
+    def get_steps_in_epoch(self):
+        return int(self.speed / self.lr ** 1.2)
+
+    def get_decay(self, _):
+        return self.decay
 
 
 class MultiCategorical(Distribution):
