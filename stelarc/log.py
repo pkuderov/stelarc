@@ -46,10 +46,7 @@ def log_results(
     loss_stats = _loss_stats
 
     n_correct = np.sum(run_data.stats.pop('n_correct'))
-    n_done = np.sum(run_data.stats.pop('n_done'))
-
-    assert n_done == delta_ep, f'{n_done=} != {delta_ep}'
-    accuracy = 100.0 * n_correct / n_done
+    accuracy = 100.0 * n_correct / delta_ep
     assert len(run_data.stats) == 0
 
     act_type_freq = run_data.act_type_stats

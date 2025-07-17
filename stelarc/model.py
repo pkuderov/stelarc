@@ -15,6 +15,7 @@ class Model(nn.Module):
 
             mem_hidden_size: int,
             mem_skip_connection: bool = False,
+            is_lstm: bool = False,
 
             body_shared: Sequence[int] = (),
             body_separate: Sequence[int] = (),
@@ -47,8 +48,11 @@ class Model(nn.Module):
         )
 
         # enc_size -> hid_size
-        # self.rnn = nn.LSTMCell(enc_size, hid_size, dtype=float)
-        self.rnn = nn.GRUCell(enc_size, mem_hidden_size, dtype=dtype)
+        self.is_lstm = is_lstm
+        if self.is_lstm:
+            self.rnn = nn.LSTMCell(enc_size, mem_hidden_size, dtype=dtype)
+        else:
+            self.rnn = nn.GRUCell(enc_size, mem_hidden_size, dtype=dtype)
         print('Memory: ', self.rnn)
 
         # body input is the input state for RL part,
@@ -131,7 +135,9 @@ class Model(nn.Module):
 
     def _encode(self, x, state):
         e = _fw(self.encoder, x)
-        h = state = self.rnn(e, state)
+
+        state = self.rnn(e, state)
+        h = state[0] if self.is_lstm else state
 
         if self.skip_conn_option is None:
             # no skip connection
@@ -181,6 +187,17 @@ class Model(nn.Module):
         if answer:
             answer_mask = act_type == self._act_answer
         return zoom_mask, move_mask, answer_mask
+
+    def reset_state(self, state, reset_mask):
+        reset_mask = reset_mask.view(-1, 1)
+
+        def _reset(h):
+            return torch.where(reset_mask, 0.0, h)
+
+        return (_reset(state[0]), _reset(state[1])) if self.is_lstm else _reset(state)
+
+    def detach_state(self, state):
+        return (state[0].detach(), state[1].detach()) if self.is_lstm else state.detach()
 
 
 def _fw(module, x):

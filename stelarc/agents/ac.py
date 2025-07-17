@@ -166,14 +166,13 @@ class Agent(nn.Module):
             self.ent_loss_scale, self.ent_loss_scale_init / self.ent_loss_scale_max_decay
         )
 
-    @staticmethod
-    def reset_state(state, reset_mask):
+    def reset_state(self, state, reset_mask):
         if isinstance(reset_mask, np.ndarray):
             reset_mask = torch.from_numpy(reset_mask)
-        not_done = np.logical_not(reset_mask).view(-1, 1)
-        state = state * not_done
-        # state = torch.where(reset_mask.view(-1, 1), 0.0, state)
-        return state
+        return self.model.reset_state(state, reset_mask)
+
+    def detach_state(self, state):
+        return self.model.detach_state(state)
 
 
 def _normalize_entropy(h, size):

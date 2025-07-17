@@ -71,24 +71,18 @@ def sample_batch(env, agent, run_data):
         reset_tn = info['reset_mask']
         flags = batch.to_flags(term=term_tn, trunc=trunc_tn, reset=reset_tn)
 
-        np.add.at(run_data.act_type_stats, a[..., 0][~reset_tn.numpy()], 1)
-
-        # print(f'F:', flags.numpy())
-        # print(f'R:', reward.numpy())
-        # print(f'V:', v.detach().numpy())
-
         batch.put(
             a=a, logprob=logprob, entropy=entropy,
             r=reward, v=v, flags=flags
         )
         n_correct += info['n_correct']
-        n_done += info['n_done']
+        np.add.at(run_data.act_type_stats, a[..., 0][~reset_tn.numpy()], 1)
 
         obs = obs_tn
         mem_state = agent.reset_state(mem_state, reset_tn)
 
     # save state, note memory state detach
-    state.obs, state.mem_state = obs, mem_state.detach()
+    state.obs, state.mem_state = obs, agent.detach_state(mem_state)
 
     # get value-based backups for lambda returns for the last step computation
     # NB: notice no-grad and no mem state mutation! Next batch, we will call
@@ -97,7 +91,6 @@ def sample_batch(env, agent, run_data):
     batch.put(v=v)
 
     run_data.stats['n_correct'].append(n_correct)
-    run_data.stats['n_done'].append(n_done)
     agent.lambda_return(
         V=batch.v, r=batch.r, flags=batch.flags, G=batch.lambda_ret, t=batch.n_steps
     )
