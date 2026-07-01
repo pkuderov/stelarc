@@ -29,7 +29,6 @@ def run_mnist():
             img_buffer_fn=partial(PrefetchedImageBuffer, prefetch_size=num_envs * 4),
             termination_policy='first_guess',
             # termination_policy='until_correct',
-            reset_as_step=True,
 
             stats_buffer_eps=20,
         ),
@@ -105,7 +104,6 @@ def run_cifar_grayscale():
             img_buffer_fn=partial(PrefetchedImageBuffer, prefetch_size=num_envs * 4),
             termination_policy='first_guess',
             # termination_policy='until_correct',
-            reset_as_step=True,
 
             stats_buffer_eps=20,
         ),
@@ -176,13 +174,15 @@ def run_cifar_rgb():
             # lp_norm=2,
         ),
         env=SimpleNamespace(
-            num_envs=num_envs, obs_hw_shape=3, max_time_steps=25,
+            num_envs=num_envs, obs_hw_shape=12, max_time_steps=25,
             answer_reward=(1.0, 0.0),
             # step_reward=-0.00001, zoom_reward=-0.003, move_reward=0.005,
             img_buffer_fn=partial(PrefetchedImageBuffer, prefetch_size=num_envs * 4),
             termination_policy='first_guess',
             # termination_policy='until_correct',
-            reset_as_step=False,
+
+            # no_zoom_action=True,
+            # discrete_pos_obs=False, add_noise_pos_obs=True,
 
             stats_buffer_eps=50,
         ),
@@ -190,7 +190,7 @@ def run_cifar_rgb():
         model=SimpleNamespace(
             obs_size=None, obs_encoder=[32],
             mem_hidden_size=64, mem_skip_connection=False, is_lstm=False,
-            body_shared=[64], body_separate=[32], body_skip_connection=False,
+            body_shared=[], body_separate=[32], body_skip_connection=False,
             policy_heads=None,
         ),
 
@@ -201,13 +201,13 @@ def run_cifar_rgb():
             discount_gamma=0.99, gae_lambda=None,
             val_loss_scale=0.25,
 
-            ent_loss_scale=0.03, ent_loss_heads_scale=(1.0, 0.7, 0.7, 0.7),
-            ent_loss_scale_decay=0.9999,
-            ent_loss_scale_max_decay=10.,
+            ent_loss_scale=0.1, ent_loss_heads_scale=(0.2, 0.5, 1.0, 1.0),
+            ent_loss_scale_decay=0.9997,
+            ent_loss_scale_max_decay=20.,
         ),
 
         run=SimpleNamespace(
-            n_epochs=10, n_batches=4_000, n_batch_steps=4,
+            n_epochs=1, n_batches=4_000, n_batch_steps=4,
             eval_configs=[
                 dict(n_batches=10, is_greedy=True),
                 dict(n_batches=10, is_greedy=False),
@@ -215,9 +215,10 @@ def run_cifar_rgb():
         ),
 
         log=SimpleNamespace(
-            schedule=200_000,
-            wandb=False,
-            project='rlcam-ppo'
+            schedule=100_000,
+            wandb=True,
+            project='rlcam-a2c',
+            tags=[],
         ),
     )
     config.run.batch_size = config.run.n_batch_steps * config.env.num_envs

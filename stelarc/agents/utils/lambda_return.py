@@ -71,7 +71,7 @@ class LambdaReturn:
             G_t = r[t] + gamma * backup
             rev_G.append(G_t)
 
-            # Because all loss calculations still require explicit handling,
+            # Because all loss calculations still require explicit reset handling,
             # handling it here is unnecessary/excessive. I handle it here
             # by merging this logic with termination handling. Since envs
             # return r = 0 on episode reset, we will have backup = 0 by
@@ -82,46 +82,9 @@ class LambdaReturn:
             # except G[T]. G[t=0...T-1] are still correct, since it is handled
             # by term/trunc flags. And G[T] should be excluded from learning
             # in either way, so we actually don't care what is stored there.
+            # I include reset for safer way.
 
             G_tn = G_t
 
         # put resulting values in correct order
         G.extend(rev_G[::-1])
-
-    # noinspection PyPep8Naming
-    @torch.no_grad()
-    def old_incorrect(self, V, r, term, trunc, G, t):
-        gamma, lambda_ = self.gamma, self.lambda_
-        # adaptive lambda defined by the rollout length
-        if lambda_ is None:
-            lambda_ = 1.0 - 1.0 / t
-
-        # NB1: _tn subscript everywhere means _{t+1} (aka t next)
-        # NB2: initially, XXX[t] is effectively XXX[-1], which means
-        # we grab estimates from the last timestep (full backup via V)
-        G_tn = V[t]
-
-        # NB3: the whole function is meant to compute lambda returns
-        # and store them to the passed G variable
-        while t > 0:
-            V_tn = V[t]
-            t -= 1
-
-            backup = (1.0 - lambda_) * V_tn + lambda_ * G_tn
-
-            # should carefully treat the end of the episode, i.e.
-            # t_last -> t = 0 (next episode) transition
-            G[t] = torch.where(
-                term[t],
-                # a) terminated: just 0
-                0.,
-                # non-terminal:
-                torch.where(
-                    trunc[t],
-                    # b) truncated: backup onto V[s]
-                    V[t],
-                    # c) otherwise: regular r + gamma * backup
-                    r[t] + gamma * backup
-                )
-            )
-            G_tn = G[t]

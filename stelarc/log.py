@@ -6,7 +6,6 @@ from stelarc.config import ns_to_dict
 def start_wandb_run(config):
     if not config.log.wandb:
         return None
-    config.ac = config.agent.ac_type.__name__
 
     import wandb
     return wandb.init(
@@ -73,7 +72,11 @@ def log_results(
             'Global Step': step,
             'avgEpLen': avg_ep_len,
             'avgRet': avg_ret,
+            'Acc': accuracy,
             'avgSPS': avg_sps,
+            'atype/zoom': act_type_freq[0],
+            'atype/move': act_type_freq[1],
+            'atype/ans': act_type_freq[2],
         } | loss_stats
         run_data.wandb_run.log(metrics)
     return avg_ret
